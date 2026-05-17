@@ -46,6 +46,98 @@ def _to_csv(df):
     return df.to_csv(index=False).encode('utf-8')
 
 
+def _range_start_from_label(range_label, ref_date):
+    if range_label == "Last 30 Days":
+        return ref_date - pd.Timedelta(days=29)
+    if range_label == "Last 12 Weeks":
+        return ref_date - pd.Timedelta(weeks=12)
+    if range_label == "Last 12 Months":
+        return ref_date - pd.DateOffset(months=12)
+    if range_label == "Year to Date":
+        return ref_date.replace(month=1, day=1)
+    return None
+
+
+def _freq_for_granularity(granularity):
+    if granularity == "Daily":
+        return "D"
+    if granularity == "Weekly":
+        return "W-MON"
+    if granularity == "Monthly":
+        return "MS"
+    return "YS"
+
+
+def _month_bounds(ref_date):
+    ts = pd.Timestamp(ref_date)
+    start = ts.replace(day=1)
+    end = (start + pd.offsets.MonthEnd(1)).normalize()
+    return start, end
+
+
+def _previous_month_bounds(ref_date):
+    this_start, _ = _month_bounds(ref_date)
+    prev_end = this_start - pd.Timedelta(days=1)
+    prev_start = prev_end.replace(day=1)
+    return prev_start, prev_end
+
+
+def _format_period_label(series, granularity):
+    if granularity == "Daily":
+        return series.dt.strftime("%Y-%m-%d")
+    if granularity == "Weekly":
+        return "Week of " + series.dt.strftime("%Y-%m-%d")
+    if granularity == "Monthly":
+        return series.dt.strftime("%b %Y")
+    return series.dt.strftime("%Y")
+
+
+def _aggregate_series(df, date_col, value_col, granularity):
+    if df.empty or date_col not in df.columns or value_col not in df.columns:
+        return pd.DataFrame(columns=["period_start", "period_label", "amount", "cumulative_amount"])
+
+    freq = _freq_for_granularity(granularity)
+    temp = df.copy()
+    temp[date_col] = pd.to_datetime(temp[date_col], errors='coerce')
+    temp[value_col] = pd.to_numeric(temp[value_col], errors='coerce').fillna(0.0)
+    temp = temp.dropna(subset=[date_col])
+    if temp.empty:
+        return pd.DataFrame(columns=["period_start", "period_label", "amount", "cumulative_amount"])
+
+    grouped = (
+        temp.groupby(pd.Grouper(key=date_col, freq=freq), as_index=False)[value_col]
+        .sum()
+        .sort_values(date_col)
+        .rename(columns={date_col: "period_start", value_col: "amount"})
+    )
+    grouped["period_label"] = _format_period_label(grouped["period_start"], granularity)
+    grouped["cumulative_amount"] = grouped["amount"].cumsum()
+    return grouped
+
+
+def _aggregate_by_group(df, date_col, value_col, group_col, granularity):
+    if df.empty or group_col not in df.columns:
+        return pd.DataFrame(columns=["period_start", "period_label", group_col, "amount"])
+
+    freq = _freq_for_granularity(granularity)
+    temp = df.copy()
+    temp[date_col] = pd.to_datetime(temp[date_col], errors='coerce')
+    temp[value_col] = pd.to_numeric(temp[value_col], errors='coerce').fillna(0.0)
+    temp[group_col] = temp[group_col].fillna("Uncategorized").astype(str)
+    temp = temp.dropna(subset=[date_col])
+    if temp.empty:
+        return pd.DataFrame(columns=["period_start", "period_label", group_col, "amount"])
+
+    grouped = (
+        temp.groupby([pd.Grouper(key=date_col, freq=freq), group_col], as_index=False)[value_col]
+        .sum()
+        .sort_values([date_col, group_col])
+        .rename(columns={date_col: "period_start", value_col: "amount"})
+    )
+    grouped["period_label"] = _format_period_label(grouped["period_start"], granularity)
+    return grouped
+
+
 def _get_theme_palette(theme_mode):
     if theme_mode == "Dark":
         return {
@@ -139,22 +231,33 @@ def _get_theme_palette(theme_mode):
     }
 
 
-def _style_plot(fig, font_family, base_size, chart_height):
+def _style_plot(
+    fig,
+    font_family,
+    base_size,
+    chart_height,
+    legend_orientation="h",
+    legend_x=1,
+    legend_y=1.02,
+    legend_xanchor="right",
+    legend_yanchor="bottom",
+    margin_right=20,
+):
     theme = THEME_COLORS or _get_theme_palette("Light")
     fig.update_layout(
         font={"family": font_family, "size": base_size, "color": theme["text"]},
         template=theme["plot_template"],
-        margin={"l": 20, "r": 20, "t": 50, "b": 20},
+        margin={"l": 20, "r": margin_right, "t": 50, "b": 20},
         height=chart_height,
         paper_bgcolor=theme["plot_paper_bg"],
         plot_bgcolor=theme["plot_bg"],
         title={"font": {"color": theme["text"]}},
         legend={
-            "orientation": "h",
-            "yanchor": "bottom",
-            "y": 1.02,
-            "xanchor": "right",
-            "x": 1,
+            "orientation": legend_orientation,
+            "yanchor": legend_yanchor,
+            "y": legend_y,
+            "xanchor": legend_xanchor,
+            "x": legend_x,
             "font": {"color": theme["text"]},
             "title": {"font": {"color": theme["text"]}},
             "bgcolor": theme["plot_bg"],
@@ -186,37 +289,25 @@ def _render_colored_progress(label, ratio, status_text, bar_color, details_text)
     )
 
 
-def _create_3d_like_pie(df, value_col, name_col, title):
+def _create_pie_chart(df, value_col, name_col, title):
     pie_df = df.groupby(name_col, as_index=False)[value_col].sum()
     if pie_df.empty:
         return None
 
-    # Layered donut traces create a subtle 3D-like depth effect.
-    base = go.Pie(
+    pie = go.Pie(
         labels=pie_df[name_col],
         values=pie_df[value_col],
-        hole=0.35,
-        textinfo='none',
-        marker={"colors": ["rgba(30,64,175,0.25)", "rgba(15,23,42,0.25)", "rgba(14,116,144,0.25)", "rgba(21,128,61,0.25)", "rgba(180,83,9,0.25)", "rgba(190,24,93,0.25)"]},
-        sort=False,
-        direction='clockwise',
-        domain={"x": [0, 1], "y": [0.04, 1]},
-    )
-    top = go.Pie(
-        labels=pie_df[name_col],
-        values=pie_df[value_col],
-        hole=0.35,
+        hole=0.25,
         textinfo='percent+label',
         textposition='inside',
-        textfont={"color": "#e5e9f0", "size": 14},
+        textfont={"size": 13},
         automargin=True,
         sort=False,
         direction='clockwise',
         marker={"line": {"color": "white", "width": 1}},
-        domain={"x": [0, 1], "y": [0.10, 1]},
     )
 
-    fig = go.Figure(data=[base, top])
+    fig = go.Figure(data=[pie])
     fig.update_layout(title=title, showlegend=False)
     return fig
 
@@ -689,7 +780,18 @@ tab_overview, tab_expenses, tab_income, tab_budgets, tab_settings = st.tabs([
 # --- Tab: Overview ---
 with tab_overview:
     st.header("Financial Overview")
-    view_option = st.selectbox("View Perspective", ["Weekly", "Monthly", "Yearly"])
+    overview_range = st.selectbox(
+        "Time Range",
+        ["Last 30 Days", "Last 12 Weeks", "Last 12 Months", "Year to Date", "All Time"],
+        index=0,
+        key="overview_time_range",
+    )
+    overview_granularity = st.selectbox(
+        "Chart Granularity",
+        ["Daily", "Weekly", "Monthly", "Yearly"],
+        index=2,
+        key="overview_granularity",
+    )
     
     # Data loading
     exp_data = get_all_expenses()
@@ -709,18 +811,30 @@ with tab_overview:
             df_exp = _ensure_date_col(df_exp)
         if not df_inc.empty:
             df_inc = _ensure_date_col(df_inc)
-        
-        # Filter based on view_option (showing current period)
-        today = pd.Timestamp.now()
-        if view_option == "Weekly":
-            start_date = today - timedelta(days=today.weekday())
-        elif view_option == "Monthly":
-            start_date = today.replace(day=1)
-        else: # Yearly
-            start_date = today.replace(month=1, day=1)
-            
-        current_exp = df_exp[df_exp['date'] >= start_date] if not df_exp.empty else pd.DataFrame()
-        current_inc = df_inc[df_inc['date'] >= start_date] if not df_inc.empty else pd.DataFrame()
+
+        today = pd.Timestamp.now().normalize()
+        start_date = _range_start_from_label(overview_range, today)
+
+        monthly_calendar_mode = overview_granularity == "Monthly"
+        if monthly_calendar_mode:
+            month_start, month_end = _month_bounds(today)
+            current_exp = (
+                df_exp[(df_exp['date'] >= month_start) & (df_exp['date'] <= month_end)]
+                if not df_exp.empty else pd.DataFrame()
+            )
+            current_inc = (
+                df_inc[(df_inc['date'] >= month_start) & (df_inc['date'] <= month_end)]
+                if not df_inc.empty else pd.DataFrame()
+            )
+            overview_period_text = f"Calendar Month: {month_start.strftime('%b %Y')}"
+        else:
+            current_exp = (
+                df_exp[df_exp['date'] >= start_date] if (start_date is not None and not df_exp.empty) else df_exp.copy()
+            ) if not df_exp.empty else pd.DataFrame()
+            current_inc = (
+                df_inc[df_inc['date'] >= start_date] if (start_date is not None and not df_inc.empty) else df_inc.copy()
+            ) if not df_inc.empty else pd.DataFrame()
+            overview_period_text = overview_range
         
         total_exp = current_exp['amount'].sum() if not current_exp.empty else 0
         total_inc = current_inc['amount'].sum() if not current_inc.empty else 0
@@ -735,54 +849,206 @@ with tab_overview:
         m4.metric("Savings Rate", f"{savings_rate:,.1f}%")
         
         st.divider()
+
+        period_label = f"{overview_granularity} ({overview_period_text})"
         
         col_c1, col_c2 = st.columns(2)
         with col_c1:
             if not current_exp.empty:
                 st.subheader("Expense Distribution")
-                fig = _create_3d_like_pie(current_exp, 'amount', 'category', 'Expense Distribution (3D-style)')
+                fig = _create_pie_chart(current_exp, 'amount', 'category', f'Expense Distribution - {overview_period_text}')
                 if fig is not None:
                     fig = _style_plot(fig, selected_font_css, plot_font_size, chart_height_setting)
                 st.plotly_chart(fig, width="stretch")
         with col_c2:
             st.subheader("Income vs Expenses")
-            exp_series = current_exp.groupby('date', as_index=False)['amount'].sum() if not current_exp.empty else pd.DataFrame(columns=['date', 'amount'])
-            exp_series['kind'] = 'Expenses'
-            inc_series = current_inc.groupby('date', as_index=False)['amount'].sum() if not current_inc.empty else pd.DataFrame(columns=['date', 'amount'])
-            inc_series['kind'] = 'Income'
-            compare_df = pd.concat([exp_series, inc_series], ignore_index=True)
+            exp_series = _aggregate_series(current_exp, 'date', 'amount', overview_granularity)
+            exp_series['kind'] = f"Expenses ({overview_granularity})"
+            inc_series = _aggregate_series(current_inc, 'date', 'amount', overview_granularity)
+            inc_series['kind'] = f"Income ({overview_granularity})"
+            compare_df = pd.concat([
+                exp_series[['period_start', 'amount', 'kind']],
+                inc_series[['period_start', 'amount', 'kind']],
+            ], ignore_index=True)
             if not compare_df.empty:
-                fig = px.bar(compare_df, x='date', y='amount', color='kind', barmode='group')
+                fig = px.bar(compare_df, x='period_start', y='amount', color='kind', barmode='group')
                 fig.update_layout(yaxis_title=f"Amount ({currency})")
                 fig = _style_plot(fig, selected_font_css, plot_font_size, chart_height_setting)
                 st.plotly_chart(fig, width="stretch")
 
-        st.subheader("Trendlines")
+        st.subheader(f"Trendlines - {period_label}")
         t1, t2 = st.columns(2)
         with t1:
             if not current_exp.empty:
-                exp_trend = current_exp.groupby('date', as_index=False)['amount'].sum().sort_values('date')
-                exp_trend['rolling_7'] = exp_trend['amount'].rolling(7, min_periods=1).mean()
+                exp_trend = _aggregate_series(current_exp, 'date', 'amount', overview_granularity)
+                exp_trend['rolling_avg'] = exp_trend['amount'].rolling(3, min_periods=1).mean()
                 fig_exp_trend = go.Figure()
-                fig_exp_trend.add_trace(go.Scatter(x=exp_trend['date'], y=exp_trend['amount'], mode='lines+markers', name='Daily Expenses'))
-                fig_exp_trend.add_trace(go.Scatter(x=exp_trend['date'], y=exp_trend['rolling_7'], mode='lines', name='7-day Trend', line={"width": 3}))
-                fig_exp_trend.update_layout(title='Expense Trendline', yaxis_title=f'Amount ({currency})')
+                fig_exp_trend.add_trace(go.Scatter(
+                    x=exp_trend['period_start'],
+                    y=exp_trend['amount'],
+                    mode='lines+markers',
+                    name=f'{overview_granularity} Expenses',
+                ))
+                fig_exp_trend.add_trace(go.Scatter(
+                    x=exp_trend['period_start'],
+                    y=exp_trend['rolling_avg'],
+                    mode='lines',
+                    name=f'{overview_granularity} Avg Trend',
+                    line={"width": 3},
+                ))
+                fig_exp_trend.update_layout(title=f'Expense Trendline - {period_label}', yaxis_title=f'Amount ({currency})')
                 fig_exp_trend = _style_plot(fig_exp_trend, selected_font_css, plot_font_size, chart_height_setting)
                 st.plotly_chart(fig_exp_trend, width="stretch")
             else:
                 st.info("Add expense history to see trendlines.")
         with t2:
             if not current_inc.empty:
-                inc_trend = current_inc.groupby('date', as_index=False)['amount'].sum().sort_values('date')
-                inc_trend['rolling_7'] = inc_trend['amount'].rolling(7, min_periods=1).mean()
+                inc_trend = _aggregate_series(current_inc, 'date', 'amount', overview_granularity)
+                inc_trend['rolling_avg'] = inc_trend['amount'].rolling(3, min_periods=1).mean()
                 fig_inc_trend = go.Figure()
-                fig_inc_trend.add_trace(go.Scatter(x=inc_trend['date'], y=inc_trend['amount'], mode='lines+markers', name='Daily Income'))
-                fig_inc_trend.add_trace(go.Scatter(x=inc_trend['date'], y=inc_trend['rolling_7'], mode='lines', name='7-day Trend', line={"width": 3}))
-                fig_inc_trend.update_layout(title='Income Trendline', yaxis_title=f'Amount ({currency})')
+                fig_inc_trend.add_trace(go.Scatter(
+                    x=inc_trend['period_start'],
+                    y=inc_trend['amount'],
+                    mode='lines+markers',
+                    name=f'{overview_granularity} Income',
+                ))
+                fig_inc_trend.add_trace(go.Scatter(
+                    x=inc_trend['period_start'],
+                    y=inc_trend['rolling_avg'],
+                    mode='lines',
+                    name=f'{overview_granularity} Avg Trend',
+                    line={"width": 3},
+                ))
+                fig_inc_trend.update_layout(title=f'Income Trendline - {period_label}', yaxis_title=f'Amount ({currency})')
                 fig_inc_trend = _style_plot(fig_inc_trend, selected_font_css, plot_font_size, chart_height_setting)
                 st.plotly_chart(fig_inc_trend, width="stretch")
             else:
                 st.info("Add income history to see trendlines.")
+
+        st.subheader("Categorized Totals")
+        ctot1, ctot2 = st.columns(2)
+        with ctot1:
+            exp_cat_totals = (
+                current_exp.groupby('category', as_index=False)['amount'].sum().sort_values('amount', ascending=False)
+                if not current_exp.empty else pd.DataFrame(columns=['category', 'amount'])
+            )
+            if not exp_cat_totals.empty:
+                fig_exp_cat = px.bar(
+                    exp_cat_totals,
+                    x='category',
+                    y='amount',
+                    color='category',
+                    title=f'Expense by Category - {overview_period_text}',
+                )
+                fig_exp_cat.update_layout(showlegend=False, yaxis_title=f"Amount ({currency})")
+                fig_exp_cat = _style_plot(fig_exp_cat, selected_font_css, plot_font_size, chart_height_setting)
+                st.plotly_chart(fig_exp_cat, width="stretch")
+            else:
+                st.info("No categorized expense data for the selected range.")
+        with ctot2:
+            inc_src_totals = (
+                current_inc.groupby('source', as_index=False)['amount'].sum().sort_values('amount', ascending=False)
+                if not current_inc.empty else pd.DataFrame(columns=['source', 'amount'])
+            )
+            if not inc_src_totals.empty:
+                fig_inc_src = px.bar(
+                    inc_src_totals,
+                    x='source',
+                    y='amount',
+                    color='source',
+                    title=f'Income by Source - {overview_period_text}',
+                )
+                fig_inc_src.update_layout(showlegend=False, yaxis_title=f"Amount ({currency})")
+                fig_inc_src = _style_plot(fig_inc_src, selected_font_css, plot_font_size, chart_height_setting)
+                st.plotly_chart(fig_inc_src, width="stretch")
+            else:
+                st.info("No categorized income data for the selected range.")
+
+        st.subheader("Past-Month Expense Insights")
+        months_back = st.slider(
+            "Months to Analyze",
+            min_value=3,
+            max_value=36,
+            value=12,
+            step=1,
+            key="overview_months_back",
+        )
+        if not df_exp.empty:
+            monthly_start = (today - pd.DateOffset(months=months_back - 1)).replace(day=1)
+            monthly_exp = df_exp[df_exp['date'] >= monthly_start].copy()
+            monthly_exp['month'] = monthly_exp['date'].dt.to_period('M').dt.to_timestamp()
+            available_cats = sorted(monthly_exp['category'].dropna().astype(str).unique().tolist())
+            selected_cats = st.multiselect(
+                "Categories to Include",
+                options=available_cats,
+                default=available_cats,
+                key="overview_monthly_categories",
+            )
+            if selected_cats:
+                monthly_exp = monthly_exp[monthly_exp['category'].isin(selected_cats)]
+
+            if not monthly_exp.empty:
+                past_month_chart_height = min(920, max(560, chart_height_setting + 120))
+                monthly_cat = (
+                    monthly_exp.groupby(['month', 'category'], as_index=False)['amount']
+                    .sum()
+                    .sort_values(['month', 'category'])
+                )
+                monthly_total = (
+                    monthly_exp.groupby('month', as_index=False)['amount']
+                    .sum()
+                    .sort_values('month')
+                )
+                monthly_total['cumulative_amount'] = monthly_total['amount'].cumsum()
+
+                pm1, pm2 = st.columns(2)
+                with pm1:
+                    fig_monthly_cat = px.bar(
+                        monthly_cat,
+                        x='month',
+                        y='amount',
+                        color='category',
+                        title=f'Monthly Categorized Expenses - Last {months_back} Months',
+                    )
+                    fig_monthly_cat.update_layout(yaxis_title=f"Amount ({currency})", legend_title_text="Category")
+                    fig_monthly_cat = _style_plot(
+                        fig_monthly_cat,
+                        selected_font_css,
+                        plot_font_size,
+                        past_month_chart_height,
+                        legend_orientation="v",
+                        legend_x=1.02,
+                        legend_y=1,
+                        legend_xanchor="left",
+                        legend_yanchor="top",
+                        margin_right=180,
+                    )
+                    st.plotly_chart(fig_monthly_cat, width="stretch")
+
+                with pm2:
+                    fig_monthly_cum = go.Figure()
+                    fig_monthly_cum.add_trace(go.Bar(
+                        x=monthly_total['month'],
+                        y=monthly_total['amount'],
+                        name='Monthly Total',
+                    ))
+                    fig_monthly_cum.add_trace(go.Scatter(
+                        x=monthly_total['month'],
+                        y=monthly_total['cumulative_amount'],
+                        mode='lines+markers',
+                        name='Cumulative Total',
+                        line={"width": 3},
+                    ))
+                    fig_monthly_cum.update_layout(
+                        title=f'Monthly and Cumulative Expense - Last {months_back} Months',
+                        yaxis_title=f'Amount ({currency})',
+                    )
+                    fig_monthly_cum = _style_plot(fig_monthly_cum, selected_font_css, plot_font_size, past_month_chart_height)
+                    st.plotly_chart(fig_monthly_cum, width="stretch")
+            else:
+                st.info("No monthly expense data found for the selected categories/time range.")
+        else:
+            st.info("Add expenses to analyze monthly categorized and cumulative totals.")
 
         if not current_exp.empty:
             top_spend = current_exp.groupby('category', as_index=False)['amount'].sum().sort_values('amount', ascending=False).head(1)
@@ -822,6 +1088,14 @@ with tab_expenses:
 
     chart_container_exp = st.container()
     editor_container_exp = st.container()
+
+    income_for_compare = get_all_income()
+    df_inc_for_compare = pd.DataFrame([
+        {"date": i.date, "amount": i.amount, "source": i.source}
+        for i in income_for_compare
+    ])
+    if not df_inc_for_compare.empty:
+        df_inc_for_compare = _ensure_date_col(df_inc_for_compare)
 
     with editor_container_exp:
         st.subheader("Manage Expenses")
@@ -930,13 +1204,53 @@ with tab_expenses:
         chart_df = cleaned_edited.copy()
         if not chart_df.empty:
             chart_df['amount'] = pd.to_numeric(chart_df['amount'], errors='coerce').fillna(0.0)
+            chart_df['date'] = pd.to_datetime(chart_df['date'], errors='coerce')
+
+        today_date = date.today()
+        default_start = today_date - timedelta(days=90)
+        f1, f2, f3 = st.columns([1, 1, 1.2])
+        with f1:
+            exp_start_date = st.date_input("From", value=default_start, key="exp_chart_from")
+        with f2:
+            exp_end_date = st.date_input("To", value=today_date, key="exp_chart_to")
+        with f3:
+            expense_granularity = st.selectbox(
+                "Chart Grouping",
+                ["Daily", "Weekly", "Monthly", "Yearly"],
+                index=2,
+                key="expense_chart_granularity",
+            )
+
+        monthly_mode_exp = expense_granularity == "Monthly"
+        if monthly_mode_exp:
+            exp_month_start, exp_month_end = _month_bounds(exp_end_date)
+            exp_start_date = exp_month_start.date()
+            exp_end_date = exp_month_end.date()
+            st.caption(f"Monthly mode uses calendar month: {exp_month_start.strftime('%b %Y')}")
+
+        if exp_start_date > exp_end_date:
+            st.warning("'From' date is after 'To' date. Please adjust the range.")
+            filtered_chart_df = pd.DataFrame(columns=chart_df.columns)
+        else:
+            filtered_chart_df = chart_df.copy()
+            if not filtered_chart_df.empty:
+                filtered_chart_df = filtered_chart_df.dropna(subset=['date'])
+                filtered_chart_df = filtered_chart_df[
+                    (filtered_chart_df['date'] >= pd.Timestamp(exp_start_date))
+                    & (filtered_chart_df['date'] <= pd.Timestamp(exp_end_date))
+                ]
 
         chart_col1, chart_col2 = st.columns(2)
         with chart_col1:
-            if not chart_df.empty:
-                pie_source = chart_df.dropna(subset=['category'])
+            if not filtered_chart_df.empty:
+                pie_source = filtered_chart_df.dropna(subset=['category'])
                 if not pie_source.empty:
-                    pie = _create_3d_like_pie(pie_source, 'amount', 'category', 'Expense Share (3D-style)')
+                    pie = _create_pie_chart(
+                        pie_source,
+                        'amount',
+                        'category',
+                        f'Expense Share ({expense_granularity}) - {exp_start_date} to {exp_end_date}',
+                    )
                     if pie is not None:
                         pie = _style_plot(pie, selected_font_css, plot_font_size, chart_height_setting)
                         pie.update_layout(uniformtext_minsize=11, uniformtext_mode='show')
@@ -944,36 +1258,176 @@ with tab_expenses:
                 else:
                     st.info("Add categories to see chart distribution.")
             else:
-                st.info("Add expenses to see chart distribution.")
+                st.info("No expenses found in the selected range.")
 
         with chart_col2:
-            if not chart_df.empty:
-                bar_source = chart_df.dropna(subset=['date']).copy()
-                if not bar_source.empty:
-                    bar_source['date'] = pd.to_datetime(bar_source['date'], errors='coerce')
-                    bar_source = bar_source.groupby('date', as_index=False)['amount'].sum()
-                    bar = px.bar(bar_source, x='date', y='amount')
-                    bar.update_layout(yaxis_title=f"Amount ({currency})")
+            if not filtered_chart_df.empty:
+                grouped_source = _aggregate_series(filtered_chart_df, 'date', 'amount', expense_granularity)
+                if not grouped_source.empty:
+                    bar = px.bar(
+                        grouped_source,
+                        x='period_start',
+                        y='amount',
+                        title=(
+                            f"Total Expenses by {expense_granularity} "
+                            f"({exp_start_date} to {exp_end_date})"
+                        ),
+                    )
+                    bar.update_layout(
+                        yaxis_title=f"Amount ({currency})",
+                        legend_title_text=f"{expense_granularity} Totals",
+                    )
                     bar = _style_plot(bar, selected_font_css, plot_font_size, chart_height_setting)
                     st.plotly_chart(bar, width="stretch")
                 else:
                     st.info("Add valid dates to see timeline chart.")
             else:
-                st.info("Add expenses to see timeline chart.")
+                st.info("No timeline data in selected range.")
 
-        if not chart_df.empty:
-            trend_df = chart_df.dropna(subset=['date']).copy()
-            trend_df['date'] = pd.to_datetime(trend_df['date'], errors='coerce')
-            trend_df = trend_df.dropna(subset=['date'])
+        if not filtered_chart_df.empty:
+            cat_totals_exp = (
+                filtered_chart_df.groupby('category', as_index=False)['amount']
+                .sum()
+                .sort_values('amount', ascending=False)
+            )
+            if not cat_totals_exp.empty:
+                fig_cat_totals_exp = px.bar(
+                    cat_totals_exp,
+                    x='category',
+                    y='amount',
+                    color='category',
+                    title=(
+                        f"Categorized Total Expenses ({exp_start_date} to {exp_end_date})"
+                    ),
+                )
+                fig_cat_totals_exp.update_layout(showlegend=False, yaxis_title=f"Amount ({currency})")
+                fig_cat_totals_exp = _style_plot(fig_cat_totals_exp, selected_font_css, plot_font_size, chart_height_setting)
+                st.plotly_chart(fig_cat_totals_exp, width="stretch")
+            else:
+                st.info("No categorized totals available for the selected range.")
+
+        comparison_mode_exp = st.toggle("Comparison Mode (vs Previous Period)", value=False, key="expenses_compare_mode")
+        if comparison_mode_exp:
+            if exp_start_date > exp_end_date:
+                st.info("Comparison Mode requires a valid date range.")
+            else:
+                current_start_ts = pd.Timestamp(exp_start_date)
+                current_end_ts = pd.Timestamp(exp_end_date)
+                if monthly_mode_exp:
+                    prev_start, prev_end = _previous_month_bounds(current_end_ts)
+                else:
+                    window_days = max(1, (current_end_ts - current_start_ts).days + 1)
+                    prev_end = current_start_ts - pd.Timedelta(days=1)
+                    prev_start = prev_end - pd.Timedelta(days=window_days - 1)
+
+                current_exp_total = float(filtered_chart_df['amount'].sum()) if not filtered_chart_df.empty else 0.0
+                prev_exp_df = chart_df[
+                    (chart_df['date'] >= prev_start) &
+                    (chart_df['date'] <= prev_end)
+                ] if not chart_df.empty else pd.DataFrame()
+                prev_exp_total = float(prev_exp_df['amount'].sum()) if not prev_exp_df.empty else 0.0
+
+                current_inc_df = df_inc_for_compare[
+                    (df_inc_for_compare['date'] >= current_start_ts) &
+                    (df_inc_for_compare['date'] <= current_end_ts)
+                ] if not df_inc_for_compare.empty else pd.DataFrame()
+                prev_inc_df = df_inc_for_compare[
+                    (df_inc_for_compare['date'] >= prev_start) &
+                    (df_inc_for_compare['date'] <= prev_end)
+                ] if not df_inc_for_compare.empty else pd.DataFrame()
+
+                current_inc_total = float(current_inc_df['amount'].sum()) if not current_inc_df.empty else 0.0
+                prev_inc_total = float(prev_inc_df['amount'].sum()) if not prev_inc_df.empty else 0.0
+                current_balance = current_inc_total - current_exp_total
+                prev_balance = prev_inc_total - prev_exp_total
+
+                st.subheader("Comparison vs Previous Period")
+                pc1, pc2, pc3 = st.columns(3)
+                pc1.metric("Income Change", f"{currency}{current_inc_total:,.2f}", delta=f"{(current_inc_total - prev_inc_total):,.2f}")
+                pc2.metric("Expense Change", f"{currency}{current_exp_total:,.2f}", delta=f"{(current_exp_total - prev_exp_total):,.2f}", delta_color="inverse")
+                pc3.metric("Balance Change", f"{currency}{current_balance:,.2f}", delta=f"{(current_balance - prev_balance):,.2f}")
+
+                compare_rows = pd.DataFrame([
+                    {"metric": "Income", "Current": current_inc_total, "Previous": prev_inc_total},
+                    {"metric": "Expenses", "Current": current_exp_total, "Previous": prev_exp_total},
+                    {"metric": "Net Balance", "Current": current_balance, "Previous": prev_balance},
+                ])
+                compare_long = compare_rows.melt(id_vars="metric", var_name="period", value_name="amount")
+                fig_cmp = px.bar(compare_long, x='metric', y='amount', color='period', barmode='group')
+                fig_cmp.update_layout(
+                    title=(
+                        f"Current vs Previous ({'Calendar Month' if monthly_mode_exp else 'Expenses Date Range'})\n"
+                        f"Current: {current_start_ts.date()} to {current_end_ts.date()} | Previous: {prev_start.date()} to {prev_end.date()}"
+                    ),
+                    yaxis_title=f"Amount ({currency})",
+                )
+                fig_cmp = _style_plot(fig_cmp, selected_font_css, plot_font_size, chart_height_setting)
+                st.plotly_chart(fig_cmp, width="stretch")
+
+                current_cat = (
+                    filtered_chart_df.groupby('category', as_index=False)['amount'].sum()
+                    .rename(columns={'amount': 'Current'})
+                    if not filtered_chart_df.empty else pd.DataFrame(columns=['category', 'Current'])
+                )
+                prev_cat = (
+                    prev_exp_df.groupby('category', as_index=False)['amount'].sum()
+                    .rename(columns={'amount': 'Previous'})
+                    if not prev_exp_df.empty else pd.DataFrame(columns=['category', 'Previous'])
+                )
+
+                compare_cat = pd.merge(current_cat, prev_cat, on='category', how='outer').fillna(0.0)
+                if not compare_cat.empty:
+                    compare_cat_long = compare_cat.melt(id_vars='category', var_name='period', value_name='amount')
+                    fig_cat_cmp = px.bar(
+                        compare_cat_long,
+                        x='category',
+                        y='amount',
+                        color='period',
+                        barmode='group',
+                        title='Categorized Expense Totals: Current vs Previous',
+                    )
+                    fig_cat_cmp.update_layout(yaxis_title=f"Amount ({currency})")
+                    fig_cat_cmp = _style_plot(fig_cat_cmp, selected_font_css, plot_font_size, chart_height_setting)
+                    st.plotly_chart(fig_cat_cmp, width="stretch")
+                else:
+                    st.info("No categorized comparison data available for the selected range.")
+
+        if not filtered_chart_df.empty:
+            trend_df = _aggregate_series(filtered_chart_df, 'date', 'amount', expense_granularity)
             if not trend_df.empty:
-                trend_df = trend_df.groupby('date', as_index=False)['amount'].sum().sort_values('date')
-                trend_df['rolling_7'] = trend_df['amount'].rolling(7, min_periods=1).mean()
+                trend_df['rolling_avg'] = trend_df['amount'].rolling(3, min_periods=1).mean()
                 fig_editor_trend = go.Figure()
-                fig_editor_trend.add_trace(go.Scatter(x=trend_df['date'], y=trend_df['amount'], mode='lines+markers', name='Daily'))
-                fig_editor_trend.add_trace(go.Scatter(x=trend_df['date'], y=trend_df['rolling_7'], mode='lines', name='7-day Trend', line={"width": 3}))
-                fig_editor_trend.update_layout(title='Expense Trendline (Editor Data)', yaxis_title=f'Amount ({currency})')
+                fig_editor_trend.add_trace(go.Bar(
+                    x=trend_df['period_start'],
+                    y=trend_df['amount'],
+                    name=f'{expense_granularity} Total',
+                ))
+                fig_editor_trend.add_trace(go.Scatter(
+                    x=trend_df['period_start'],
+                    y=trend_df['cumulative_amount'],
+                    mode='lines+markers',
+                    name='Cumulative Total',
+                    line={"width": 3},
+                ))
+                fig_editor_trend.add_trace(go.Scatter(
+                    x=trend_df['period_start'],
+                    y=trend_df['rolling_avg'],
+                    mode='lines',
+                    name=f'{expense_granularity} Avg Trend',
+                    line={"width": 2, "dash": "dot"},
+                ))
+                fig_editor_trend.update_layout(
+                    title=(
+                        f'Expense Total and Cumulative Trend - {expense_granularity} '
+                        f'({exp_start_date} to {exp_end_date})'
+                    ),
+                    yaxis_title=f'Amount ({currency})',
+                    legend_title_text=f'{expense_granularity} Metrics',
+                )
                 fig_editor_trend = _style_plot(fig_editor_trend, selected_font_css, plot_font_size, chart_height_setting)
                 st.plotly_chart(fig_editor_trend, width="stretch")
+        else:
+            st.info("Select a valid time frame with expense data to see totals and cumulative charts.")
 
 
 # --- Tab: Income ---
