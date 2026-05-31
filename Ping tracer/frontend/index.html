@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ping Tracer Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            fontFamily: {
+              display: ["Space Grotesk", "ui-sans-serif", "system-ui"],
+              body: ["Manrope", "ui-sans-serif", "system-ui"],
+            },
+            keyframes: {
+              pulseAlert: {
+                "0%, 100%": { boxShadow: "0 0 0 0 rgba(220, 38, 38, 0.0)" },
+                "50%": { boxShadow: "0 0 0 4px rgba(220, 38, 38, 0.28)" },
+              },
+              fadeInUp: {
+                "0%": { opacity: "0", transform: "translateY(6px)" },
+                "100%": { opacity: "1", transform: "translateY(0)" },
+              },
+            },
+            animation: {
+              "pulse-alert": "pulseAlert 1.2s ease-in-out infinite",
+              "fade-in-up": "fadeInUp 320ms ease-out both",
+            },
+          },
+        },
+      };
+    </script>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Manrope:wght@400;600;700&display=swap" />
+    <link rel="stylesheet" href="/assets/css/styles.css" />
+  </head>
+  <body class="h-full font-body bg-slate-100 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+    <div class="page-bg"></div>
+
+    <div class="relative min-h-full">
+      <header class="border-b border-slate-200/80 dark:border-slate-800/80 backdrop-blur bg-white/70 dark:bg-slate-900/70 sticky top-0 z-20">
+        <div class="mx-auto max-w-[1600px] px-4 py-3 md:px-6 flex items-center justify-between gap-4">
+          <div>
+            <h1 class="font-display text-2xl md:text-3xl tracking-tight">Ping Tracer</h1>
+            <p class="text-sm text-slate-600 dark:text-slate-300">Real-time multi-device latency and packet loss observability</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button id="theme-toggle" class="btn-secondary">Toggle Theme</button>
+            <button id="start-stop-btn" class="btn-primary">Start Monitoring</button>
+          </div>
+        </div>
+      </header>
+
+      <main class="mx-auto max-w-[1600px] p-4 md:p-6 grid grid-cols-1 xl:grid-cols-[340px_1fr_320px] gap-4 md:gap-6">
+        <section class="panel animate-fade-in-up" style="animation-delay: 50ms;">
+          <div class="panel-title-row">
+            <h2 class="panel-title">Targets</h2>
+            <span id="target-count" class="badge">0 / 16</span>
+          </div>
+          <label class="field-label" for="latency-threshold">Latency Threshold (ms)</label>
+          <input id="latency-threshold" type="number" min="1" max="5000" value="200" class="field-input" />
+
+          <div class="mt-4 flex items-center justify-between">
+            <h3 class="text-sm font-semibold">Device List</h3>
+            <button id="add-target-btn" class="btn-secondary text-sm py-1.5">Add Target</button>
+          </div>
+          <div id="target-list" class="mt-3 space-y-2 max-h-[460px] overflow-auto pr-1"></div>
+          <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">Supports IPv4/IPv6 and hostnames. Duplicate targets are ignored.</p>
+        </section>
+
+        <section class="animate-fade-in-up" style="animation-delay: 120ms;">
+          <div id="cards-grid" class="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-4"></div>
+          <div id="empty-state" class="panel text-center py-16 hidden">
+            <p class="text-lg font-semibold">No active devices</p>
+            <p class="text-sm text-slate-600 dark:text-slate-300 mt-2">Add targets and start monitoring to render live charts.</p>
+          </div>
+        </section>
+
+        <aside class="panel animate-fade-in-up" style="animation-delay: 190ms;">
+          <div class="panel-title-row">
+            <h2 class="panel-title">Anomaly History</h2>
+            <button id="clear-anomalies-btn" class="btn-secondary text-sm py-1.5">Clear</button>
+          </div>
+          <div id="anomaly-history" class="space-y-2 max-h-[640px] overflow-auto pr-1"></div>
+        </aside>
+      </main>
+
+      <div id="expanded-modal" class="modal-backdrop hidden">
+        <div class="modal-panel">
+          <div class="panel-title-row mb-2">
+            <h2 id="expanded-title" class="panel-title">Expanded Trace</h2>
+            <div class="flex items-center gap-2">
+              <button id="expanded-reset-zoom" class="btn-secondary text-sm py-1.5">Reset Zoom</button>
+              <button id="expanded-close" class="btn-secondary text-sm py-1.5">Close</button>
+            </div>
+          </div>
+          <p class="text-xs text-slate-600 dark:text-slate-300 mb-2">Session trace from monitor start. Scroll both directions or pan/zoom to inspect points.</p>
+          <div id="expanded-chart-scroll" class="expanded-scroll">
+            <canvas id="expanded-chart-canvas"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+    <script src="/assets/js/app.js" defer></script>
+  </body>
+</html>
